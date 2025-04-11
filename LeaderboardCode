@@ -18,9 +18,6 @@ def calculate_leaderboard(excel_path):
     draft_columns = [col for col in df.columns if col.startswith('draft_')]
     draft_events = sorted(list(set(col.split('_')[1] for col in draft_columns if col.split('_')[1].isdigit())))
     
-    # Track clean sweep across all players (only one per season)
-    clean_sweep_used = False
-    
     # Calculate individual game stats
     def process_individual_scores(row):
         games_played = row['individual_games_played']
@@ -38,7 +35,6 @@ def calculate_leaderboard(excel_path):
     
     # Calculate draft stats
     def process_draft_scores(row):
-        nonlocal clean_sweep_used
         total_draft_points = 0
         max_possible_draft = 0
         
@@ -51,7 +47,7 @@ def calculate_leaderboard(excel_path):
                 losses = row.get(f'{event_key}_losses', 0)
                 undefeated_rounds = row.get(f'{event_key}_undefeated', 0)
                 has_bye = row.get(f'{event_key}_bye', False)
-                is_clean_sweep = row.get(f'{event_key}_clean_sweep', False) and not clean_sweep_used
+                is_clean_sweep = row.get(f'{event_key}_clean_sweep', False)
                 
                 # Base points
                 event_points = DRAFT_PARTICIPATION
@@ -64,7 +60,6 @@ def calculate_leaderboard(excel_path):
                     event_points += DRAFT_WIN_POINTS  # Bye counts as a win
                 if is_clean_sweep:
                     event_points += CLEAN_SWEEP_BONUS
-                    clean_sweep_used = True
                 
                 total_draft_points += event_points
                 
@@ -72,7 +67,7 @@ def calculate_leaderboard(excel_path):
                 max_event = DRAFT_PARTICIPATION
                 max_event += rounds * DRAFT_WIN_POINTS
                 max_event += rounds * UNDEFEATED_ROUND_BONUS
-                if rounds >= 3:  # Only possible to get clean sweep in 3+ round events
+                if rounds >= 3:  # Clean sweep possible in 3+ round events
                     max_event += CLEAN_SWEEP_BONUS
                 
                 max_possible_draft += max_event
@@ -82,9 +77,6 @@ def calculate_leaderboard(excel_path):
     # Process each player
     results = []
     for _, row in df.iterrows():
-        # Reset clean sweep flag for each player (only one per season)
-        clean_sweep_used = False
-        
         # Individual calculations
         penalty, grinder_bonus = process_individual_scores(row)
         adj_individual = row['individual_points'] - penalty
