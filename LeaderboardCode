@@ -1,0 +1,127 @@
+import pandas as pd
+import numpy as np
+
+def calculate_leaderboard(excel_path):
+    # Load data from Excel
+    df = pd.read_excel(excel_path)
+    
+    # Constants from your rules
+    MIN_GAMES = 15
+    PENALTY_MULTIPLIER = 3
+    DRAFT_WIN_POINTS = 4
+    DRAFT_LOSS_POINTS = 2
+    UNDEFEATED_ROUND_BONUS = 3
+    CLEAN_SWEEP_BONUS = 10
+    DRAFT_PARTICIPATION = 10
+    
+    # Dynamically detect draft events (columns starting with 'draft_')
+    draft_columns = [col for col in df.columns if col.startswith('draft_')]
+    draft_events = sorted(list(set(col.split('_')[1] for col in draft_columns if col.split('_')[1].isdigit())))
+    
+    # Track clean sweep across all players (only one per season)
+    clean_sweep_used = False
+    
+    # Calculate individual game stats
+    def process_individual_scores(row):
+        games_played = row['individual_games_played']
+        individual_score = row['individual_points']
+        max_possible_individual = row['max_individual_possible']
+        
+        # Calculate penalty
+        penalty = max(0, (MIN_GAMES - games_played)) * PENALTY_MULTIPLIER if games_played < MIN_GAMES else 0
+        
+        # Grinder bonus
+        max_in_league = df['max_individual_possible'].max()
+        grinder_bonus = individual_score / max_in_league if max_in_league > 0 else 0
+        
+        return penalty, grinder_bonus
+    
+    # Calculate draft stats
+    def process_draft_scores(row):
+        nonlocal clean_sweep_used
+        total_draft_points = 0
+        max_possible_draft = 0
+        
+        # Process each draft event
+        for event in draft_events:
+            event_key = f'draft_{event}'
+            if pd.notna(row.get(event_key, np.nan)):
+                rounds = row.get(f'{event_key}_rounds', 0)
+                wins = row.get(f'{event_key}_wins', 0)
+                losses = row.get(f'{event_key}_losses', 0)
+                undefeated_rounds = row.get(f'{event_key}_undefeated', 0)
+                has_bye = row.get(f'{event_key}_bye', False)
+                is_clean_sweep = row.get(f'{event_key}_clean_sweep', False) and not clean_sweep_used
+                
+                # Base points
+                event_points = DRAFT_PARTICIPATION
+                event_points += wins * DRAFT_WIN_POINTS
+                event_points += losses * DRAFT_LOSS_POINTS
+                
+                # Bonuses
+                event_points += undefeated_rounds * UNDEFEATED_ROUND_BONUS
+                if has_bye:
+                    event_points += DRAFT_WIN_POINTS  # Bye counts as a win
+                if is_clean_sweep:
+                    event_points += CLEAN_SWEEP_BONUS
+                    clean_sweep_used = True
+                
+                total_draft_points += event_points
+                
+                # Calculate max possible for this event
+                max_event = DRAFT_PARTICIPATION
+                max_event += rounds * DRAFT_WIN_POINTS
+                max_event += rounds * UNDEFEATED_ROUND_BONUS
+                if rounds >= 3:  # Only possible to get clean sweep in 3+ round events
+                    max_event += CLEAN_SWEEP_BONUS
+                
+                max_possible_draft += max_event
+        
+        return total_draft_points, max_possible_draft
+    
+    # Process each player
+    results = []
+    for _, row in df.iterrows():
+        # Reset clean sweep flag for each player (only one per season)
+        clean_sweep_used = False
+        
+        # Individual calculations
+        penalty, grinder_bonus = process_individual_scores(row)
+        adj_individual = row['individual_points'] - penalty
+        max_individual = row['max_individual_possible']
+        indiv_ratio = adj_individual / max_individual if max_individual > 0 else 0
+        
+        # Draft calculations
+        draft_points, max_draft = process_draft_scores(row)
+        draft_ratio = draft_points / max_draft if max_draft > 0 else 0
+        
+        # Final score
+        total_score = indiv_ratio + draft_ratio + grinder_bonus
+        
+        results.append({
+            'player_name': row['player_name'],
+            'games_played': row['individual_games_played'],
+            'individual_score': row['individual_points'],
+            'max_individual_possible': max_individual,
+            'draft_score': draft_points,
+            'max_draft_possible': max_draft,
+            'penalty': penalty,
+            'grinder_bonus': grinder_bonus,
+            'final_score': total_score,
+            'draft_events_attended': sum(1 for event in draft_events if pd.notna(row.get(f'draft_{event}', np.nan)))
+        })
+    
+    # Create and sort leaderboard
+    leaderboard = pd.DataFrame(results)
+    leaderboard = leaderboard.sort_values('final_score', ascending=False)
+    leaderboard['rank'] = range(1, len(leaderboard) + 1)
+    
+    return leaderboard[['rank', 'player_name', 'final_score', 'individual_score', 
+                       'draft_score', 'penalty', 'grinder_bonus', 'games_played',
+                       'draft_events_attended', 'max_individual_possible', 'max_draft_possible']]
+
+# Example usage
+if __name__ == "__main__":
+    leaderboard = calculate_leaderboard('league_scores.xlsx')
+    print(leaderboard)
+    leaderboard.to_excel('league_leaderboard.xlsx', index=False)
