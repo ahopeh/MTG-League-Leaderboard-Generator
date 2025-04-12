@@ -1,164 +1,140 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from collections import defaultdict
-from datetime import datetime
+from matplotlib.colors import LinearSegmentedColormap
+import seaborn as sns
+from ipywidgets import interact, Dropdown
 
-# Configuration
-plt.style.use('ggplot')
-COLORS = ['#4E79A7', '#F28E2B', '#E15759', '#76B7B2', '#59A14F', '#EDC948', '#B07AA1', '#FF9DA7', '#9C755F', '#BAB0AC']
+# Custom Styling
+plt.style.use('seaborn-darkgrid')
+colors = ['#4C72B0', '#DD8452', '#55A868', '#C44E52', '#8172B3', '#937860', '#DA8BC3', '#8C8C8C', '#CCB974', '#64B5CD']
+cmap = LinearSegmentedColormap.from_list('custom', colors[:3])
 
-def calculate_leaderboard(individual_path, draft_path):
-    # ... (keep the same calculation functions as before) ...
-    return leaderboard
-
-def weekly_tracking(individual_path):
-    df = pd.read_csv(individual_path)
-    df['date'] = pd.to_datetime(df['game_id'].astype(str).str[:8], format='%Y%m%d', errors='coerce')
-    df['week'] = df['date'].dt.isocalendar().week
+def load_and_process_data(individual_path, draft_path):
+    # Load Excel files
+    indiv_df = pd.read_excel(individual_path)
+    draft_df = pd.read_excel(draft_path)
     
-    weekly = df.groupby(['player', 'week']).agg(
-        games=('game_id', 'count'),
-        points=('points', 'sum')
+    # Process Individual Games
+    indiv_scores = indiv_df.groupby('player').agg(
+        games_played=('game_id', 'count'),
+        individual_points=('points', 'sum'),
+        max_possible=('pod_size', 'sum')
     ).reset_index()
     
-    return weekly.pivot(index='week', columns='player', values='points').fillna(0)
-
-def head_to_head(individual_path, player1, player2):
-    df = pd.read_csv(individual_path)
-    shared_games = df.groupby('game_id').filter(
-        lambda x: player1 in x['player'].values and player2 in x['player'].values
+    # Process Draft Events
+    draft_scores = draft_df.groupby('player').agg(
+        drafts_attended=('event_id', 'nunique'),
+        draft_points=('points', 'sum'),
+        max_draft=('max_possible', 'max'),
+        undefeated_rounds=('undefeated', 'sum')
+    ).reset_index()
+    
+    # Merge and calculate final scores
+    merged = pd.merge(indiv_scores, draft_scores, on='player', how='outer').fillna(0)
+    
+    # Apply scoring formula
+    merged['penalty'] = np.where(
+        merged['games_played'] < 15,
+        (15 - merged['games_played']) * 3,
+        0
     )
     
-    results = {
-        'shared_games': len(shared_games['game_id'].unique()),
-        f'{player1}_wins': sum(
-            (shared_games['player'] == player1) & (shared_games['placement'] == 1)
-        ),
-        f'{player2}_wins': sum(
-            (shared_games['player'] == player2) & (shared_games['placement'] == 1)
-        ),
-        'both_lost': sum(
-            (shared_games['player'].isin([player1, player2])) & 
-            (shared_games['placement'] > 1)
-        ) // 2  # Since both appear in each game
-    }
-    return results
+    highest_max = merged['max_possible'].max()
+    
+    merged['final_score'] = (
+        (merged['individual_points'] - merged['penalty']) / merged['max_possible'] +
+        merged['draft_points'] / merged['max_draft'] +
+        merged['individual_points'] / highest_max +
+        (merged['draft_points'] / merged['max_draft']) * 
+        (0.1 + 0.07 * merged['drafts_attended']) * merged['undefeated_rounds']
+    )
+    
+    # Rank players
+    leaderboard = merged.sort_values('final_score', ascending=False)
+    leaderboard['rank'] = range(1, len(leaderboard)+1)
+    
+    return leaderboard, indiv_df, draft_df
 
-def visualize_data(leaderboard, player=None):
-    if player:
-        # Player progression
-        fig, ax = plt.subplots(2, 1, figsize=(10, 8))
-        
-        # Score components
-        player_data = leaderboard[leaderboard['player'] == player].iloc[0]
-        components = {
-            'Individual': player_data['individual_points'],
-            'Draft': player_data['draft_points'],
-            'Grinder Bonus': player_data['grinder_bonus'],
-            'Penalty': -player_data['penalty']
-        }
-        ax[0].bar(components.keys(), components.values(), color=COLORS[:4])
-        ax[0].set_title(f'{player} - Score Breakdown')
-        
-        # Weekly performance
-        weekly = weekly_tracking("individual_results.csv")
-        ax[1].plot(weekly.index, weekly[player], marker='o', color=COLORS[4])
-        ax[1].set_title(f'{player} - Weekly Points')
-        ax[1].set_xlabel('Week')
-        ax[1].set_ylabel('Points')
-        
-    else:
-        # Leaderboard visualization
-        plt.figure(figsize=(12, 6))
-        top_players = leaderboard.head(10)
-        bars = plt.barh(
-            top_players['player'],
-            top_players['final_score'],
-            color=COLORS
-        )
-        plt.title('Top 10 Players')
-        plt.xlabel('Final Score')
-        
-        # Add score labels
-        for bar in bars:
-            width = bar.get_width()
-            plt.text(width-5, bar.get_y() + bar.get_height()/2,
-                    f'{width:.1f}', ha='right', va='center')
+def plot_leaderboard(leaderboard):
+    plt.figure(figsize=(12, 8))
+    top_players = leaderboard.head(10)
+    sns.barplot(x='final_score', y='player', data=top_players, palette=colors)
+    plt.title('Top 10 Players - Final Scores', fontsize=16)
+    plt.xlabel('Final Score', fontsize=14)
+    plt.ylabel('Player', fontsize=14)
+    plt.show()
+
+def player_dashboard(player, leaderboard, indiv_df, draft_df):
+    player_data = leaderboard[leaderboard['player'] == player].iloc[0]
+    
+    # Create figure
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle(f'Player Dashboard: {player}', fontsize=18)
+    
+    # Score Breakdown
+    components = pd.Series({
+        'Individual': player_data['individual_points'] / player_data['max_possible'],
+        'Draft': player_data['draft_points'] / player_data['max_draft'],
+        'Grinder Bonus': player_data['individual_points'] / leaderboard['max_possible'].max(),
+        'Undefeated Bonus': (player_data['draft_points'] / player_data['max_draft']) * 
+                           (0.1 + 0.07 * player_data['drafts_attended']) * 
+                           player_data['undefeated_rounds']
+    })
+    components.plot.pie(ax=axes[0,0], autopct='%1.1f%%', colors=colors, startangle=90)
+    axes[0,0].set_title('Score Composition', fontsize=14)
+    
+    # Weekly Performance
+    weekly = indiv_df[indiv_df['player'] == player].groupby(
+        pd.to_datetime(indiv_df['date']).dt.isocalendar().week
+    )['points'].sum()
+    weekly.plot(ax=axes[0,1], marker='o', color=colors[1], linewidth=2.5)
+    axes[0,1].set_title('Weekly Point Progression', fontsize=14)
+    axes[0,1].set_xlabel('Week Number')
+    axes[0,1].set_ylabel('Points Earned')
+    
+    # Draft Performance
+    draft_perf = draft_df[draft_df['player'] == player].groupby('event_id')['points'].sum()
+    draft_perf.plot.bar(ax=axes[1,0], color=colors[2])
+    axes[1,0].set_title('Draft Event Performance', fontsize=14)
+    axes[1,0].set_xlabel('Draft Event')
+    axes[1,0].set_ylabel('Points Earned')
+    
+    # Pod Size Distribution
+    pod_sizes = indiv_df[indiv_df['player'] == player]['pod_size'].value_counts()
+    pod_sizes.plot.pie(ax=axes[1,1], autopct='%1.1f%%', colors=colors[3:6], startangle=90)
+    axes[1,1].set_title('Pod Size Distribution', fontsize=14)
     
     plt.tight_layout()
     plt.show()
 
-def main():
-    print("⚔️  Welcome to the Gaming League Analyzer  ⚔️\n")
+def interactive_dashboard(leaderboard, indiv_df, draft_df):
+    players = leaderboard['player'].tolist()
     
+    @interact(Player=Dropdown(options=players, description='Select Player:'))
+    def show_dashboard(Player):
+        player_dashboard(Player, leaderboard, indiv_df, draft_df)
+
+def main():
     # Load data
-    leaderboard = calculate_leaderboard(
-        "individual_results.csv",
-        "draft_results.csv"
+    leaderboard, indiv_df, draft_df = load_and_process_data(
+        'individual_results.xlsx',
+        'draft_results.xlsx'
     )
     
-    while True:
-        print("\nOptions:")
-        print("1. View Leaderboard")
-        print("2. Weekly Score Tracking")
-        print("3. Head-to-Head Comparison")
-        print("4. Player Visualization")
-        print("5. Exit")
-        
-        choice = input("\nEnter your choice (1-5): ")
-        
-        if choice == '1':
-            print("\nCurrent Leaderboard:")
-            print(leaderboard[['rank', 'player', 'final_score']].to_string(index=False))
-            
-        elif choice == '2':
-            weekly = weekly_tracking("individual_results.csv")
-            player = input("Enter player name (or leave blank for all): ")
-            
-            if player and player in weekly.columns:
-                plt.figure(figsize=(10, 5))
-                plt.plot(weekly.index, weekly[player], marker='o', color=COLORS[0])
-                plt.title(f'{player} - Weekly Points')
-                plt.xlabel('Week')
-                plt.ylabel('Points')
-                plt.grid(True)
-                plt.show()
-            else:
-                print("\nWeekly Summary:")
-                print(weekly.tail(4).to_string())  # Last 4 weeks
-        
-        elif choice == '3':
-            p1 = input("Enter first player name: ")
-            p2 = input("Enter second player name: ")
-            
-            if p1 in leaderboard['player'].values and p2 in leaderboard['player'].values:
-                results = head_to_head("individual_results.csv", p1, p2)
-                
-                # Visualization
-                fig, ax = plt.subplots(figsize=(8, 5))
-                matches = [results[f'{p1}_wins'], results[f'{p2}_wins'], results['both_lost']]
-                labels = [f'{p1} Wins', f'{p2} Wins', 'Both Lost']
-                ax.pie(matches, labels=labels, autopct='%1.1f%%', 
-                       colors=COLORS[:3], startangle=90)
-                ax.set_title(f'Head-to-Head: {p1} vs {p2}\n(Total Games: {results["shared_games"]})')
-                plt.show()
-            else:
-                print("One or both players not found!")
-        
-        elif choice == '4':
-            player = input("Enter player name: ")
-            if player in leaderboard['player'].values:
-                visualize_data(leaderboard, player)
-            else:
-                print("Player not found!")
-        
-        elif choice == '5':
-            print("Goodbye!")
-            break
-            
-        else:
-            print("Invalid choice. Please try again.")
+    # Display leaderboard
+    print("🏆 Current Leaderboard 🏆")
+    display(leaderboard[['rank', 'player', 'final_score', 
+                        'individual_points', 'draft_points',
+                        'undefeated_rounds', 'penalty']])
+    
+    # Visualizations
+    plot_leaderboard(leaderboard)
+    interactive_dashboard(leaderboard, indiv_df, draft_df)
+    
+    # Save results
+    leaderboard.to_excel('final_leaderboard.xlsx', index=False)
+    print("\nResults saved to 'final_leaderboard.xlsx'")
 
 if __name__ == "__main__":
     main()
